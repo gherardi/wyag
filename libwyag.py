@@ -67,7 +67,7 @@ class GitRepository (object):
             vers = int(self.conf.get("core", "repositoryformatversion"))
             if vers != 0:
                 raise Exception(f"Unsupported repositoryformatversion: {vers}")
-            
+
 # utility to compute missing directory structure if needed
 def repo_path(repo, *path):
     """Compute path under repo's gitdir."""
