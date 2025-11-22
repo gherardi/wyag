@@ -21,6 +21,8 @@ argsubparsers.required = True
 # process and validate commands
 def main(argv=sys.argv[1:]):
     args = argparser.parse_args(argv)
+    
+    # these functions validate and process input before executing the actual command
     match args.command:
         # case "add"          : cmd_add(args)
         # case "cat-file"     : cmd_cat_file(args)
@@ -47,6 +49,7 @@ class GitRepository (object):
     conf = None
 
     def __init__(self, path, force=False):
+        # folder structure: worktree/.git
         self.worktree = path
         self.gitdir = os.path.join(path, ".git")
 
@@ -69,6 +72,7 @@ class GitRepository (object):
                 raise Exception(f"Unsupported repositoryformatversion: {vers}")
 
 # utility to compute missing directory structure if needed
+# *path catch the remaining parameters
 def repo_path(repo, *path):
     """Compute path under repo's gitdir."""
     return os.path.join(repo.gitdir, *path)
