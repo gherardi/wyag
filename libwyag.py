@@ -107,9 +107,7 @@ def repo_create(path):
     """Create a new repository at path."""
     repo = GitRepository(path, True)
 
-    # First, we make sure the path either doesn't exist or is an
-    # empty dir.
-
+    # make sure the path either doesn't exist or is an empty dir
     if os.path.exists(repo.worktree):
         if not os.path.isdir(repo.worktree):
             raise Exception (f"{path} is not a directory!")
@@ -131,8 +129,19 @@ def repo_create(path):
     with open(repo_file(repo, "HEAD"), "w") as f:
         f.write("ref: refs/heads/master\n")
 
+    # .git/config.ini
     with open(repo_file(repo, "config"), "w") as f:
         config = repo_default_config()
         config.write(f)
 
     return repo
+
+def repo_default_config():
+    ret = configparser.ConfigParser()
+
+    ret.add_section("core")
+    ret.set("core", "repositoryformatversion", "0")
+    ret.set("core", "filemode", "false")
+    ret.set("core", "bare", "false")
+
+    return ret
