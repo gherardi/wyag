@@ -18,6 +18,10 @@ argparser = argparse.ArgumentParser(description="The stupidest content tracker")
 argsubparsers = argparser.add_subparsers(title="Commands", dest="command")
 argsubparsers.required = True
 
+#subparser for init
+argsp = argsubparsers.add_parser("init", help="Initialize a new, empty repository.")
+argsp.add_argument("path", metavar="directory", nargs="?", default=".", help="Where to create the repository.")
+
 # process and validate commands
 def main(argv=sys.argv[1:]):
     args = argparser.parse_args(argv)
@@ -30,7 +34,7 @@ def main(argv=sys.argv[1:]):
         # case "checkout"     : cmd_checkout(args)
         # case "commit"       : cmd_commit(args)
         # case "hash-object"  : cmd_hash_object(args)
-        # case "init"         : cmd_init(args)
+        case "init"         : cmd_init(args)
         # case "log"          : cmd_log(args)
         # case "ls-files"     : cmd_ls_files(args)
         # case "ls-tree"      : cmd_ls_tree(args)
@@ -145,3 +149,28 @@ def repo_default_config():
     ret.set("core", "bare", "false")
 
     return ret
+
+def cmd_init(args):
+    repo_create(args.path)
+
+def repo_find(path=".", required=True):
+    path = os.path.realpath(path)
+
+    # base case for recursion
+    if os.path.isdir(os.path.join(path, ".git")):
+        return GitRepository(path)
+
+    # If we haven't returned, recurse in parent, if w
+    parent = os.path.realpath(os.path.join(path, ".."))
+
+    if parent == path:
+        # Bottom case
+        # os.path.join("/", "..") == "/":
+        # If parent==path, then path is root.
+        if required:
+            raise Exception("No git directory.")
+        else:
+            return None
+
+    # Recursive case
+    return repo_find(parent, required)
