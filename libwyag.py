@@ -18,9 +18,21 @@ argparser = argparse.ArgumentParser(description="The stupidest content tracker")
 argsubparsers = argparser.add_subparsers(title="Commands", dest="command")
 argsubparsers.required = True
 
-#subparser for init
+# subparser for init command
 argsp = argsubparsers.add_parser("init", help="Initialize a new, empty repository.")
 argsp.add_argument("path", metavar="directory", nargs="?", default=".", help="Where to create the repository.")
+
+# subparser for cat-file command
+argsp = argsubparsers.add_parser("cat-file", help="Provide content of repository objects")
+
+argsp.add_argument("type",
+                   metavar="type",
+                   choices=["blob", "commit", "tag", "tree"],
+                   help="Specify the type")
+
+argsp.add_argument("object",
+                   metavar="object",
+                   help="The object to display")
 
 # process and validate commands
 def main(argv=sys.argv[1:]):
@@ -29,7 +41,7 @@ def main(argv=sys.argv[1:]):
     # these functions validate and process input before executing the actual command
     match args.command:
         # case "add"          : cmd_add(args)
-        # case "cat-file"     : cmd_cat_file(args)
+        case "cat-file"     : cmd_cat_file(args)
         # case "check-ignore" : cmd_check_ignore(args)
         # case "checkout"     : cmd_checkout(args)
         # case "commit"       : cmd_commit(args)
@@ -254,3 +266,24 @@ def object_write(obj, repo=None):
                 # Compress and write
                 f.write(zlib.compress(result))
     return sha
+
+def object_find(repo, name, fmt=None, follow=True):
+    return name
+
+class GitBlob(GitObject):
+    fmt=b'blob'
+
+    def serialize(self):
+        return self.blobdata
+
+    def deserialize(self, data):
+        self.blobdata = data
+
+# cat-file command functions
+def cmd_cat_file(args):
+    repo = repo_find()
+    cat_file(repo, args.object, fmt=args.type.encode())
+
+def cat_file(repo, obj, fmt=None):
+    obj = object_read(repo, object_find(repo, obj, fmt=fmt))
+    sys.stdout.buffer.write(obj.serialize())
