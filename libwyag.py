@@ -24,35 +24,18 @@ argsp.add_argument("path", metavar="directory", nargs="?", default=".", help="Wh
 
 # subparser for cat-file command
 argsp = argsubparsers.add_parser("cat-file", help="Provide content of repository objects")
-
-argsp.add_argument("type",
-                   metavar="type",
-                   choices=["blob", "commit", "tag", "tree"],
-                   help="Specify the type")
-
-argsp.add_argument("object",
-                   metavar="object",
-                   help="The object to display")
+argsp.add_argument("type", metavar="type", choices=["blob", "commit", "tag", "tree"], help="Specify the type")
+argsp.add_argument("object", metavar="object", help="The object to display")
 
 # subparser for hash-object command
-argsp = argsubparsers.add_parser(
-    "hash-object",
-    help="Compute object ID and optionally creates a blob from a file")
+argsp = argsubparsers.add_parser("hash-object", help="Compute object ID and optionally creates a blob from a file")
+argsp.add_argument("-t", metavar="type", dest="type", choices=["blob", "commit", "tag", "tree"], default="blob", help="Specify the type")
+argsp.add_argument("-w", dest="write", action="store_true", help="Actually write the object into the database")
+argsp.add_argument("path", help="Read object from <file>")
 
-argsp.add_argument("-t",
-                   metavar="type",
-                   dest="type",
-                   choices=["blob", "commit", "tag", "tree"],
-                   default="blob",
-                   help="Specify the type")
-
-argsp.add_argument("-w",
-                   dest="write",
-                   action="store_true",
-                   help="Actually write the object into the database")
-
-argsp.add_argument("path",
-                   help="Read object from <file>")
+# subparse for log command
+argsp = argsubparsers.add_parser("log", help="Display history of a given commit.")
+argsp.add_argument("commit", default="HEAD", nargs="?", help="Commit to start at.")
 
 # process and validate commands
 def main(argv=sys.argv[1:]):
@@ -67,7 +50,7 @@ def main(argv=sys.argv[1:]):
         # case "commit"       : cmd_commit(args)
         case "hash-object"  : cmd_hash_object(args)
         case "init"         : cmd_init(args)
-        # case "log"          : cmd_log(args)
+        case "log"          : cmd_log(args)
         # case "ls-files"     : cmd_ls_files(args)
         # case "ls-tree"      : cmd_ls_tree(args)
         # case "rev-parse"    : cmd_rev_parse(args)
@@ -409,3 +392,54 @@ def kvlm_serialize(kvlm):
     ret += b'\n' + kvlm[None]
 
     return ret
+
+class GitCommit(GitObject):
+    fmt=b'commit'
+
+    def deserialize(self, data):
+        self.kvlm = kvlm_parse(data)
+
+    def serialize(self):
+        return kvlm_serialize(self.kvlm)
+
+    def init(self):
+        self.kvlm = dict()
+
+def cmd_log(args):
+    repo = repo_find()
+
+    print("digraph wyaglog{")
+    print("  node[shape=rect]")
+    log_graphviz(repo, object_find(repo, args.commit), set())
+    print("}")
+
+def log_graphviz(repo, sha, seen):
+
+    if sha in seen:
+        return
+    seen.add(sha)
+
+    commit = object_read(repo, sha)
+    message = commit.kvlm[None].decode("utf8").strip()
+    message = message.replace("\\", "\\\\")
+    message = message.replace("\"", "\\\"")
+
+    if "\n" in message: # Keep only the first line
+        message = message[:message.index("\n")]
+
+    print(f"  c_{sha} [label=\"{sha[0:7]}: {message}\"]")
+    assert commit.fmt==b'commit'
+
+    if not b'parent' in commit.kvlm.keys():
+        # Base case: the initial commit.
+        return
+
+    parents = commit.kvlm[b'parent']
+
+    if type(parents) != list:
+        parents = [ parents ]
+
+    for p in parents:
+        p = p.decode("ascii")
+        print (f"  c_{sha} -> c_{p};")
+        log_graphviz(repo, p, seen)
