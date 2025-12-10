@@ -12,7 +12,7 @@ import zlib
 
 # argparse library documentation: https://docs.python.org/3/library/argparse.html
 # create the main parser for arguments
-argparser = argparse.ArgumentParser(description="The stupidest content tracker")
+argparser = argparse.ArgumentParser(description="wyag - the stupidest content tracker")
 
 # add subparser to catch commands and make it mandatory
 argsubparsers = argparser.add_subparsers(title="Commands", dest="command")
