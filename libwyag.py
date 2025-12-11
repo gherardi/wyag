@@ -47,6 +47,9 @@ argsp = argsubparsers.add_parser("checkout", help="Checkout a commit inside of a
 argsp.add_argument("commit", help="The commit or tree to checkout.")
 argsp.add_argument("path", help="The EMPTY directory to checkout on.")
 
+# subparser for show-ref-command
+argsp = argsubparsers.add_parser("show-ref", help="List references.")
+
 # process and validate commands
 def main(argv=sys.argv[1:]):
     args = argparser.parse_args(argv)
@@ -65,7 +68,7 @@ def main(argv=sys.argv[1:]):
         case "ls-tree"      : cmd_ls_tree(args)
         # case "rev-parse"    : cmd_rev_parse(args)
         # case "rm"           : cmd_rm(args)
-        # case "show-ref"     : cmd_show_ref(args)
+        case "show-ref"     : cmd_show_ref(args)
         # case "status"       : cmd_status(args)
         # case "tag"          : cmd_tag(args)
         case _              : print("Bad command.")
@@ -576,3 +579,53 @@ def tree_checkout(repo, tree, path):
             # @TODO Support symlinks (identified by mode 12****)
             with open(dest, 'wb') as f:
                 f.write(obj.blobdata)
+
+def ref_resolve(repo, ref):
+    path = repo_file(repo, ref)
+
+    # Sometimes, an indirect reference may be broken.  This is normal
+    # in one specific case: we're looking for HEAD on a new repository
+    # with no commits.  In that case, .git/HEAD points to "ref:
+    # refs/heads/main", but .git/refs/heads/main doesn't exist yet
+    # (since there's no commit for it to refer to).
+    if not os.path.isfile(path):
+        return None
+
+    with open(path, 'r') as fp:
+        data = fp.read()[:-1]
+        # Drop final \n ^^^^^
+    if data.startswith("ref: "):
+        return ref_resolve(repo, data[5:])
+    else:
+        return data
+
+def ref_list(repo, path=None):
+    if not path:
+        path = repo_dir(repo, "refs")
+    ret = dict()
+    # Git shows refs sorted.  To do the same, we sort the output of
+    # listdir
+    for f in sorted(os.listdir(path)):
+        can = os.path.join(path, f)
+        if os.path.isdir(can):
+            ret[f] = ref_list(repo, can)
+        else:
+            ret[f] = ref_resolve(repo, can)
+
+    return ret
+
+def cmd_show_ref(args):
+    repo = repo_find()
+    refs = ref_list(repo)
+    show_ref(repo, refs, prefix="refs")
+
+def show_ref(repo, refs, with_hash=True, prefix=""):
+    if prefix:
+        prefix = prefix + '/'
+    for k, v in refs.items():
+        if type(v) == str and with_hash:
+            print (f"{v} {prefix}{k}")
+        elif type(v) == str:
+            print (f"{prefix}{k}")
+        else:
+            show_ref(repo, v, with_hash=with_hash, prefix=f"{prefix}{k}")
