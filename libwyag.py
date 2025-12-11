@@ -47,7 +47,7 @@ argsp = argsubparsers.add_parser("checkout", help="Checkout a commit inside of a
 argsp.add_argument("commit", help="The commit or tree to checkout.")
 argsp.add_argument("path", help="The EMPTY directory to checkout on.")
 
-# subparser for show-ref-command
+# subparser for show-ref command
 argsp = argsubparsers.add_parser("show-ref", help="List references.")
 
 # subparser for tag command
