@@ -1,14 +1,16 @@
 import argparse
 import configparser
-from datetime import datetime
-import grp, pwd
-from fnmatch import fnmatch
+import grp
 import hashlib
-from math import ceil
 import os
+import pwd
 import re
 import sys
 import zlib
+
+from datetime import datetime
+from fnmatch import fnmatch
+from math import ceil
 
 # argparse library documentation: https://docs.python.org/3/library/argparse.html
 # create the main parser for arguments
