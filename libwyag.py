@@ -87,8 +87,6 @@ def main(argv=sys.argv[1:]):
         case _              : print("Bad command.")
 
 class GitRepository (object):
-    """A git repository"""
-
     worktree = None
     gitdir = None
     conf = None
@@ -115,6 +113,60 @@ class GitRepository (object):
             vers = int(self.conf.get("core", "repositoryformatversion"))
             if vers != 0:
                 raise Exception(f"Unsupported repositoryformatversion: {vers}")
+
+class GitObject (object):
+
+    def __init__(self, data=None):
+        if data != None:
+            self.deserialize(data)
+        else:
+            self.init()
+
+    def serialize(self, repo):
+        """This function MUST be implemented by subclasses.
+
+It must read the object's contents from self.data, a byte string, and
+do whatever it takes to convert it into a meaningful representation.
+What exactly that means depend on each subclass.
+
+        """
+        raise Exception("Unimplemented!")
+
+    def deserialize(self, data):
+        raise Exception("Unimplemented!")
+
+    def init(self):
+        pass # Just do nothing. This is a reasonable default!
+
+class GitBlob(GitObject):
+    fmt=b'blob'
+
+    def serialize(self):
+        return self.blobdata
+
+    def deserialize(self, data):
+        self.blobdata = data
+
+class GitCommit(GitObject):
+    fmt=b'commit'
+
+    def deserialize(self, data):
+        self.kvlm = kvlm_parse(data)
+
+    def serialize(self):
+        return kvlm_serialize(self.kvlm)
+
+    def init(self):
+        self.kvlm = dict()
+
+class GitTreeLeaf (object):
+    def __init__(self, mode, path, sha):
+        self.mode = mode
+        self.path = path
+        self.sha = sha
+
+class GitTag(GitCommit):
+    fmt = b'tag'
 
 # utility to compute missing directory structure if needed
 # *path catch the remaining parameters
@@ -215,34 +267,6 @@ def repo_find(path=".", required=True):
 
     # Recursive case
     return repo_find(parent, required)
-
-# What they do is actually very simple:
-# hash-object converts an existing file into a git object,
-# cat-file prints an existing git object to the standard output.
-
-class GitObject (object):
-
-    def __init__(self, data=None):
-        if data != None:
-            self.deserialize(data)
-        else:
-            self.init()
-
-    def serialize(self, repo):
-        """This function MUST be implemented by subclasses.
-
-It must read the object's contents from self.data, a byte string, and
-do whatever it takes to convert it into a meaningful representation.
-What exactly that means depend on each subclass.
-
-        """
-        raise Exception("Unimplemented!")
-
-    def deserialize(self, data):
-        raise Exception("Unimplemented!")
-
-    def init(self):
-        pass # Just do nothing. This is a reasonable default!
 
 def object_read(repo, sha):
     """Read object sha from Git repository repo.  Return a
@@ -385,15 +409,6 @@ def object_resolve(repo, name):
 
     return name
 
-class GitBlob(GitObject):
-    fmt=b'blob'
-
-    def serialize(self):
-        return self.blobdata
-
-    def deserialize(self, data):
-        self.blobdata = data
-
 # cat-file command functions
 def cmd_cat_file(args):
     repo = repo_find()
@@ -505,18 +520,6 @@ def kvlm_serialize(kvlm):
 
     return ret
 
-class GitCommit(GitObject):
-    fmt=b'commit'
-
-    def deserialize(self, data):
-        self.kvlm = kvlm_parse(data)
-
-    def serialize(self):
-        return kvlm_serialize(self.kvlm)
-
-    def init(self):
-        self.kvlm = dict()
-
 def cmd_log(args):
     repo = repo_find()
 
@@ -555,12 +558,6 @@ def log_graphviz(repo, sha, seen):
         p = p.decode("ascii")
         print (f"  c_{sha} -> c_{p};")
         log_graphviz(repo, p, seen)
-
-class GitTreeLeaf (object):
-    def __init__(self, mode, path, sha):
-        self.mode = mode
-        self.path = path
-        self.sha = sha
 
 # we write the parser in two functions:
 # 1. parser to extract a single record, which returns parsed data and the position it reached in input data
@@ -728,9 +725,6 @@ def show_ref(repo, refs, with_hash=True, prefix=""):
             print (f"{prefix}{k}")
         else:
             show_ref(repo, v, with_hash=with_hash, prefix=f"{prefix}{k}")
-
-class GitTag(GitCommit):
-    fmt = b'tag'
 
 def cmd_tag(args):
     repo = repo_find()
