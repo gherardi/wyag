@@ -71,6 +71,9 @@ argsp.add_argument("--verbose", action="store_true", help="Show everything.")
 argsp = argsubparsers.add_parser("check-ignore", help = "Check path(s) against ignore rules.")
 argsp.add_argument("path", nargs="+", help="Paths to check")
 
+# status command
+argsp = argsubparsers.add_parser("status", help = "Show the working tree status.")
+
 class GitRepository(object):
     """
     Representation of a Git repository: holds worktree, gitdir, and configuration.
@@ -318,6 +321,15 @@ def cmd_check_ignore(args):
     for path in args.path:
         if check_ignore(rules, path):
             print(path)
+
+def cmd_status(_):
+    repo = repo_find()
+    index = index_read(repo)
+
+    cmd_status_branch(repo)
+    cmd_status_head_index(repo, index)
+    print()
+    cmd_status_index_worktree(repo, index)
 
 def repo_path(repo, *path):
     # utility to compute missing directory structure if needed
@@ -1045,6 +1057,44 @@ def check_ignore(rules, path):
 
     return check_ignore_absolute(rules.absolute, path)
 
+def branch_get_active(repo):
+    with open(repo_file(repo, "HEAD"), "r") as f:
+        head = f.read()
+
+    if head.startswith("ref: refs/heads/"):
+        return(head[16:-1])
+    else:
+        return False
+
+def cmd_status_branch(repo):
+    branch = branch_get_active(repo)
+    if branch:
+        print(f"On branch {branch}.")
+    else:
+        print(f"HEAD detached at {object_find(repo, 'HEAD')}")
+
+def tree_to_dict(repo, ref, prefix=""):
+    ret = dict()
+    tree_sha = object_find(repo, ref, fmt=b"tree")
+    tree = object_read(repo, tree_sha)
+
+    for leaf in tree.items:
+        full_path = os.path.join(prefix, leaf.path)
+
+        # We read the object to extract its type (this is uselessly
+        # expensive: we could just open it as a file and read the
+        # first few bytes)
+        is_subtree = leaf.mode.startswith(b'04')
+
+        # Depending on the type, we either store the path (if it's a
+        # blob, so a regular file), or recurse (if it's another tree,
+        # so a subdir)
+        if is_subtree:
+            ret.update(tree_to_dict(repo, leaf.sha, full_path))
+        else:
+            ret[full_path] = leaf.sha
+    return ret
+
 def main(argv=sys.argv[1:]):
     # parser and command dispatch
     args = argparser.parse_args(argv)
@@ -1064,6 +1114,6 @@ def main(argv=sys.argv[1:]):
         case "rev-parse"    : cmd_rev_parse(args)
         # case "rm"           : cmd_rm(args)
         case "show-ref"     : cmd_show_ref(args)
-        # case "status"       : cmd_status(args)
+        case "status"       : cmd_status(args)
         case "tag"          : cmd_tag(args)
         case _              : print("Bad command.")
