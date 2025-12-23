@@ -74,6 +74,10 @@ argsp.add_argument("path", nargs="+", help="Paths to check")
 # status command
 argsp = argsubparsers.add_parser("status", help = "Show the working tree status.")
 
+# rm command
+argsp = argsubparsers.add_parser("rm", help="Remove files from the working tree and the index.")
+argsp.add_argument("path", nargs="+", help="Files to remove")
+
 class GitRepository(object):
     """
     Representation of a Git repository: holds worktree, gitdir, and configuration.
@@ -330,6 +334,10 @@ def cmd_status(_):
     cmd_status_head_index(repo, index)
     print()
     cmd_status_index_worktree(repo, index)
+
+def cmd_rm(args):
+    repo = repo_find()
+    rm(repo, args.path)
 
 def repo_path(repo, *path):
     # utility to compute missing directory structure if needed
@@ -1228,6 +1236,52 @@ def index_write(repo, index):
                 f.write((0).to_bytes(pad, "big"))
                 idx += pad
 
+def rm(repo, paths, delete=True, skip_missing=False):
+    # Find and read the index
+    index = index_read(repo)
+
+    worktree = repo.worktree + os.sep
+
+    # Make paths absolute
+    abspaths = set()
+    for path in paths:
+        abspath = os.path.abspath(path)
+        if abspath.startswith(worktree):
+            abspaths.add(abspath)
+        else:
+            raise Exception(f"Cannot remove paths outside of worktree: {paths}")
+
+    # The list of entries to *keep*, which we will write back to the
+    # index.
+    kept_entries = list()
+    # The list of removed paths, which we'll use after index update
+    # to physically remove the actual paths from the filesystem.
+    remove = list()
+
+    # Now iterate over the list of entries, and remove those whose
+    # paths we find in abspaths.  Preserve the others in kept_entries.
+    for e in index.entries:
+        full_path = os.path.join(repo.worktree, e.name)
+
+        if full_path in abspaths:
+            remove.append(full_path)
+            abspaths.remove(full_path)
+        else:
+            kept_entries.append(e) # Preserve entry
+
+    # If abspaths is empty, it means some paths weren't in the index.
+    if len(abspaths) > 0 and not skip_missing:
+        raise Exception(f"Cannot remove paths not in the index: {abspaths}")
+
+    # Physically delete paths from filesystem.
+    if delete:
+        for path in remove:
+            os.unlink(path)
+
+    # Update the list of entries in the index, and write it back.
+    index.entries = kept_entries
+    index_write(repo, index)
+
 def main(argv=sys.argv[1:]):
     # parser and command dispatch
     args = argparser.parse_args(argv)
@@ -1245,7 +1299,7 @@ def main(argv=sys.argv[1:]):
         case "ls-files"     : cmd_ls_files(args)
         case "ls-tree"      : cmd_ls_tree(args)
         case "rev-parse"    : cmd_rev_parse(args)
-        # case "rm"           : cmd_rm(args)
+        case "rm"           : cmd_rm(args)
         case "show-ref"     : cmd_show_ref(args)
         case "status"       : cmd_status(args)
         case "tag"          : cmd_tag(args)
