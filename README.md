@@ -19,3 +19,7 @@ A lightweight version control system implementation in Python.
 1. Clone the repository
 2. Install Python 3.10+
 3. Run `chmod +x wyag` to make the file executable
+
+## Reference
+
+This project was developed following the guide created by [Thibault Polge](https://github.com/thblt) at [https://wyag.thb.lt/](https://wyag.thb.lt/)
