@@ -15,7 +15,7 @@ class GitObject(object):
         else:
             self.init()
 
-    def serialize(self, repo):
+    def serialize(self):
         raise Exception("Unimplemented!")
 
     def deserialize(self, data):
@@ -115,23 +115,26 @@ def object_find(repository, name, fmt=None, follow=True):
     if not sha:
         raise Exception(f"No such reference {name}.")
     if len(sha) > 1:
-        raise Exception(f"Ambiguous reference {name}: Candidates are:\n - {'\n - '.join(sha)}.")
+        candidates = "\n - ".join(sha)
+        raise Exception(f"Ambiguous reference {name}: Candidates are:\n - {candidates}.")
     sha = sha[0]
     if not fmt:
         return sha
     # follow object references through tags and commits to find requested type
     while True:
         obj = object_read(repository, sha)
+        if obj is None:
+            raise Exception(f"Object {sha} not found.")
         if obj.fmt == fmt:
             return sha
         if not follow:
-            return None
+            raise Exception(f"Object {sha} is a {obj.fmt.decode('ascii')}, not {fmt.decode('ascii')}.")
         if obj.fmt == b'tag':
             sha = obj.kvlm[b'object'].decode("ascii")
         elif obj.fmt == b'commit' and fmt == b'tree':
             sha = obj.kvlm[b'tree'].decode("ascii")
         else:
-            return None
+            raise Exception(f"Object {sha} is a {obj.fmt.decode('ascii')}, not {fmt.decode('ascii')}.")
 
 def object_resolve(repository, name):
     candidates = list()
@@ -139,7 +142,8 @@ def object_resolve(repository, name):
     if not name.strip():
         return None
     if name == "HEAD":
-        return [ repo.ref_resolve(repository, "HEAD") ]
+        head = repo.ref_resolve(repository, "HEAD")
+        return [ head ] if head else []
     if hashRE.match(name):
         name = name.lower()
         prefix = name[0:2]
@@ -169,18 +173,25 @@ def object_hash(fd, fmt, repository=None):
 
 def kvlm_parse(raw, start=0, dct=None):
     # git commit/tag format: key-value list with multi-line values (continuation lines start with space)
-    if not dct: dct = dict()
+    if dct is None: dct = dict()
     spc = raw.find(b' ', start)
     nl = raw.find(b'\n', start)
     if (spc < 0) or (nl < spc):
-        assert nl == start
+        if nl != start:
+            raise Exception("Malformed object: expected blank line before message body")
         dct[None] = raw[start+1:]
         return dct
     key = raw[start:spc]
     end = start
     while True:
         end = raw.find(b'\n', end+1)
-        if raw[end+1] != ord(' '): break
+        if end == -1:
+            # malformed: header value runs to the end with no terminating newline
+            end = len(raw)
+            break
+        # a continuation line starts with a space; otherwise the value ends here
+        if end + 1 >= len(raw) or raw[end+1] != ord(' '):
+            break
     # unescape continuation lines by removing leading space
     value = raw[spc+1:end].replace(b'\n ', b'\n')
     if key in dct:
@@ -202,13 +213,14 @@ def kvlm_serialize(kvlm):
         if type(val) != list: val = [ val ]
         for v in val:
             ret += k + b' ' + (v.replace(b'\n', b'\n ')) + b'\n'
-    ret += b'\n' + kvlm[None]
+    ret += b'\n' + kvlm.get(None, b"")
     return ret
 
 def tree_parse_one(raw, start=0):
     # git tree format: mode(5-6 bytes) space path null-terminated sha(20 bytes)
     x = raw.find(b' ', start)
-    assert x-start == 5 or x-start==6
+    if x - start not in (5, 6):
+        raise Exception(f"Malformed tree entry: bad mode width at offset {start}")
     mode = raw[start:x]
     if len(mode) == 5:
         mode = b"0" + mode
@@ -229,19 +241,26 @@ def tree_parse(raw):
         ret.append(data)
     return ret
 
+def is_tree(mode):
+    # tree (directory) entries have mode 040000; blobs, symlinks (120000) and
+    # gitlinks (160000) are all leaves
+    return mode.startswith(b"04")
+
 def tree_leaf_sort_key(leaf):
-    # sort tree entries: directories must sort before files in same name
-    # append "/" to directory names (mode 04) to ensure correct ordering
-    if leaf.mode.startswith(b"10"):
-        return leaf.path
-    else:
+    # git sorts tree entries by name, treating a directory as if its name ended
+    # in "/" so a subtree sorts before a file sharing its prefix; only trees get
+    # the implicit slash (symlinks/gitlinks sort as plain names)
+    if is_tree(leaf.mode):
         return leaf.path + "/"
-    
+    else:
+        return leaf.path
+
 def tree_serialize(obj):
     obj.items.sort(key=tree_leaf_sort_key)
     ret = b''
     for i in obj.items:
-        ret += i.mode
+        # git stores modes as octal with no leading zero (tree 040000 -> 40000)
+        ret += i.mode.lstrip(b"0")
         ret += b' '
         ret += i.path.encode("utf8")
         ret += b'\x00'
@@ -252,11 +271,11 @@ def tree_serialize(obj):
 def ls_tree(repository, ref, recursive=None, prefix=""):
     sha = object_find(repository, ref, fmt=b"tree")
     obj = object_read(repository, sha)
+    if obj is None:
+        raise Exception(f"Object {sha} not found.")
     for item in obj.items:
-        if len(item.mode) == 5:
-            type = item.mode[0:1]
-        else:
-            type = item.mode[0:2]
+        # mode is normalized to 6 bytes on parse, so the type prefix is the first 2
+        type = item.mode[0:2]
         match type:
             case b'04': type = "tree"
             case b'10': type = "blob"
@@ -264,13 +283,15 @@ def ls_tree(repository, ref, recursive=None, prefix=""):
             case b'16': type = "commit"
             case _: raise Exception(f"Weird tree leaf mode {item.mode}")
         if not (recursive and type=='tree'):
-            print(f"{'0' * (6 - len(item.mode)) + item.mode.decode('ascii')} {type} {item.sha}\t{os.path.join(prefix, item.path)}")
+            print(f"{item.mode.decode('ascii')} {type} {item.sha}\t{os.path.join(prefix, item.path)}")
         else:
             ls_tree(repository, item.sha, recursive, os.path.join(prefix, item.path))
 
 def tree_checkout(repository, tree, path):
     for item in tree.items:
         obj = object_read(repository, item.sha)
+        if obj is None:
+            raise Exception(f"Object {item.sha} not found.")
         dest = os.path.join(path, item.path)
         if obj.fmt == b'tree':
             os.mkdir(dest)
@@ -285,7 +306,7 @@ def tree_to_dict(repository, ref, prefix=""):
     tree = object_read(repository, tree_sha)
     for leaf in tree.items:
         full_path = os.path.join(prefix, leaf.path)
-        is_subtree = leaf.mode.startswith(b'04')
+        is_subtree = is_tree(leaf.mode)
         if is_subtree:
             ret.update(tree_to_dict(repository, leaf.sha, full_path))
         else:
@@ -298,6 +319,8 @@ def log_graphviz(repository, sha, seen):
     if sha in seen: return
     seen.add(sha)
     commit = object_read(repository, sha)
+    if commit is None:
+        raise Exception(f"Object {sha} not found.")
     message = commit.kvlm[None].decode("utf8").strip()
     message = message.replace("\\", "\\\\").replace("\"", "\\\"")
     if "\n" in message:

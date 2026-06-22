@@ -42,10 +42,9 @@ def cmd_ls_tree(args):
 
 def cmd_checkout(args):
     repository = repo.repo_find()
-    obj = objects.object_read(repository, objects.object_find(repository, args.commit))
-    if obj.fmt == b'commit':
-        obj = objects.object_read(repository, obj.kvlm[b'tree'].decode("ascii"))
-    
+    # resolve to a tree, following annotated tags and commits
+    obj = objects.object_read(repository, objects.object_find(repository, args.commit, fmt=b'tree'))
+
     if os.path.exists(args.path):
         if not os.path.isdir(args.path):
             raise Exception(f"Not a directory {args.path}!")
@@ -112,7 +111,7 @@ def cmd_status_head_index(repository, idx):
     # compare index (staging area) with HEAD commit
     # shows files staged for commit (added, modified, or deleted relative to HEAD)
     print("Changes to be committed:")
-    head_sha = objects.object_find(repository, "HEAD")
+    head_sha = repo.ref_resolve(repository, "HEAD")
     if head_sha:
         head = objects.tree_to_dict(repository, "HEAD")
     else:
@@ -191,7 +190,7 @@ def cmd_commit(args):
     repository = repo.repo_find()
     idx = index.index_read(repository)
     tree = index.tree_from_index(repository, idx)
-    commit = objects.commit_create(repository, tree, objects.object_find(repository, "HEAD"), repo.gitconfig_user_get(repo.gitconfig_read()), datetime.now(), args.message)
+    commit = objects.commit_create(repository, tree, repo.ref_resolve(repository, "HEAD"), repo.gitconfig_user_get(repo.gitconfig_read()), datetime.now(), args.message)
     active_branch = repo.branch_get_active(repository)
     if active_branch:
         with open(repo.repo_file(repository, os.path.join("refs/heads", active_branch)), "w") as fd:

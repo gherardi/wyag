@@ -1,4 +1,5 @@
 import os
+import stat
 import time
 import tempfile
 from math import ceil
@@ -192,18 +193,29 @@ def add(repository, paths, delete=True, skip_missing=False):
             raise Exception(f"Not a file, or outside the worktree: {paths}")
     index = index_read(repository)
     for (abspath, relpath) in clean_paths:
-        with open(abspath, "rb") as fd:
-            sha = objects.object_hash(fd, b"blob", repository)
-            stat = os.stat(abspath)
-            ctime_s = int(stat.st_ctime)
-            ctime_ns = stat.st_ctime_ns % 10**9
-            mtime_s = int(stat.st_mtime)
-            mtime_ns = stat.st_mtime_ns % 10**9
-            entry = GitIndexEntry(ctime=(ctime_s, ctime_ns), mtime=(mtime_s, mtime_ns), dev=stat.st_dev, ino=stat.st_ino,
-                                  mode_type=0b1000, mode_perms=0o644, uid=stat.st_uid, gid=stat.st_gid,
-                                  fsize=stat.st_size, sha=sha, flag_assume_valid=False,
-                                  flag_stage=False, name=relpath)
-            index.entries.append(entry)
+        # lstat (not stat) so symlinks are detected rather than followed
+        st = os.lstat(abspath)
+        if stat.S_ISLNK(st.st_mode):
+            # a symlink is stored as a blob holding its target path
+            mode_type = 0b1010
+            mode_perms = 0
+            blob = objects.GitBlob(os.readlink(abspath).encode("utf8"))
+            sha = objects.object_write(blob, repository)
+        else:
+            # regular file: preserve the executable bit like git (100755 vs 100644)
+            mode_type = 0b1000
+            mode_perms = 0o755 if (st.st_mode & stat.S_IXUSR) else 0o644
+            with open(abspath, "rb") as fd:
+                sha = objects.object_hash(fd, b"blob", repository)
+        ctime_s = int(st.st_ctime)
+        ctime_ns = st.st_ctime_ns % 10**9
+        mtime_s = int(st.st_mtime)
+        mtime_ns = st.st_mtime_ns % 10**9
+        entry = GitIndexEntry(ctime=(ctime_s, ctime_ns), mtime=(mtime_s, mtime_ns), dev=st.st_dev, ino=st.st_ino,
+                              mode_type=mode_type, mode_perms=mode_perms, uid=st.st_uid, gid=st.st_gid,
+                              fsize=st.st_size, sha=sha, flag_assume_valid=False,
+                              flag_stage=False, name=relpath)
+        index.entries.append(entry)
     index_write(repository, index)
 
 def tree_from_index(repository, index):
