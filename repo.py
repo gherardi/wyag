@@ -1,6 +1,8 @@
 import os
 import configparser
 
+import storage
+
 class GitRepository(object):
     """
     Representation of a Git repository: holds worktree, gitdir, and configuration.
@@ -12,6 +14,7 @@ class GitRepository(object):
     def __init__(self, path, force=False):
         self.worktree = path
         self.gitdir = os.path.join(path, ".git")
+        self.storage = storage.FilesystemStorage(self.gitdir)
 
         if not (force or os.path.isdir(self.gitdir)):
             raise Exception(f"Not a Git repository {path}")

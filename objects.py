@@ -1,12 +1,7 @@
 import hashlib
 import os
 import re
-import sys
-import zlib
-import tempfile
-from math import ceil
 
-import repo
 import refs
 
 class ObjectNotFound(Exception):
@@ -79,51 +74,28 @@ TREE_LEAF_MODE_TYPES = {
 }
 
 def object_read(repository, sha):
-    # decompress git object from disk and parse its header
-    # format: type-name space size null-byte data
-    path = repo.repo_file(repository, "objects", sha[0:2], sha[2:])
-    if not os.path.isfile(path):
+    # read raw object bytes through storage adapter and deserialize
+    raw = repository.storage.read_object(sha)
+    if raw is None:
         raise ObjectNotFound(f"Object {sha} not found.")
-    with open (path, "rb") as f:
-        raw = zlib.decompress(f.read())
-        x = raw.find(b' ')
-        fmt = raw[0:x]
-        y = raw.find(b'\x00', x)
-        size = int(raw[x:y].decode("ascii"))
-        if size != len(raw)-y-1:
-            raise Exception(f"Malformed object {sha}: bad length")
-        cls = OBJECT_TYPES.get(fmt)
-        if cls is None:
-            raise Exception(f"Unknown type {fmt.decode('ascii')} for object {sha}")
-        return cls(raw[y+1:])
+    x = raw.find(b' ')
+    fmt = raw[0:x]
+    y = raw.find(b'\x00', x)
+    size = int(raw[x:y].decode("ascii"))
+    if size != len(raw)-y-1:
+        raise Exception(f"Malformed object {sha}: bad length")
+    cls = OBJECT_TYPES.get(fmt)
+    if cls is None:
+        raise Exception(f"Unknown type {fmt.decode('ascii')} for object {sha}")
+    return cls(raw[y+1:])
 
 def object_write(obj, repository=None):
-    """
-    writes a git object to the repository with atomic write to prevent corruption.
-    """
+    # serialize then persist through storage adapter if repository given
     data = obj.serialize()
     result = obj.fmt + b' ' + str(len(data)).encode() + b'\x00' + data
     sha = hashlib.sha1(result).hexdigest()
-
     if repository:
-        path = repo.repo_file(repository, "objects", sha[0:2], sha[2:], mkdir=True)
-
-        if not os.path.exists(path):
-            # atomic write pattern: write to temp file then rename to avoid partial writes
-            dirname = os.path.dirname(path)
-            fd, tmp_path = tempfile.mkstemp(dir=dirname)
-            
-            try:
-                with os.fdopen(fd, 'wb') as f:
-                    f.write(zlib.compress(result))
-                # atomic rename operation is guaranteed to be safe
-                os.replace(tmp_path, path)
-            except Exception as e:
-                # cleanup temp file on error
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
-                raise e
-
+        repository.storage.write_object(sha, result)
     return sha
 
 def object_find(repository, name, fmt=None, follow=True):
