@@ -77,17 +77,8 @@ def object_read(repository, sha):
     # read raw object bytes through storage adapter and deserialize
     raw = repository.storage.read_object(sha)
     if raw is None:
-        raise ObjectNotFound(f"Object {sha} not found.")
-    x = raw.find(b' ')
-    fmt = raw[0:x]
-    y = raw.find(b'\x00', x)
-    size = int(raw[x:y].decode("ascii"))
-    if size != len(raw)-y-1:
-        raise Exception(f"Malformed object {sha}: bad length")
-    cls = OBJECT_TYPES.get(fmt)
-    if cls is None:
-        raise Exception(f"Unknown type {fmt.decode('ascii')} for object {sha}")
-    return cls(raw[y+1:])
+        return None
+    return object_deserialize(raw)
 
 def object_write(obj, repository=None):
     # serialize then persist through storage adapter if repository given
@@ -97,6 +88,26 @@ def object_write(obj, repository=None):
     if repository:
         repository.storage.write_object(sha, result)
     return sha
+
+def object_serialize(obj):
+    # render git object to on-the-wire bytes and content hash (pure, no I/O)
+    data = obj.serialize()
+    raw = obj.fmt + b' ' + str(len(data)).encode() + b'\x00' + data
+    sha = hashlib.sha1(raw).hexdigest()
+    return sha, raw
+
+def object_deserialize(raw):
+    # deserialize raw bytes to git object, returns None if malformed
+    x = raw.find(b' ')
+    fmt = raw[0:x]
+    y = raw.find(b'\x00', x)
+    size = int(raw[x:y].decode("ascii"))
+    if size != len(raw)-y-1:
+        raise Exception(f"Malformed object: bad length")
+    cls = OBJECT_TYPES.get(fmt)
+    if cls is None:
+        raise Exception(f"Unknown type {fmt.decode('ascii')}")
+    return cls(raw[y+1:])
 
 def object_find(repository, name, fmt=None, follow=True):
     sha = object_resolve(repository, name)
@@ -111,6 +122,8 @@ def object_find(repository, name, fmt=None, follow=True):
     # follow object references through tags and commits to find requested type
     while True:
         obj = object_read(repository, sha)
+        if obj is None:
+            raise Exception(f"Object {sha} not found.")
         if obj.fmt == fmt:
             return sha
         if not follow:
@@ -322,7 +335,7 @@ def commit_create(repository, tree, parent, author, timestamp, message):
     hours = offset // 3600
     minutes = (offset % 3600) // 60
     # git commit timestamp format: "unix_timestamp +HHMM" where HHMM is timezone offset
-    tz = "{}{:02}{:02}".format("+" if offset > 0 else "-", hours, minutes)
+    tz = "{}{:02d}{:02d}".format("+" if offset >= 0 else "-", abs(hours), abs(minutes))
     author = author + timestamp.strftime(" %s ") + tz
     commit.kvlm[b"author"] = author.encode("utf8")
     commit.kvlm[b"committer"] = author.encode("utf8")

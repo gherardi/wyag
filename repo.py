@@ -126,3 +126,11 @@ def gitconfig_user_get(config):
         if "name" in config["user"] and "email" in config["user"]:
             return f"{config['user']['name']} <{config['user']['email']}>"
     return None
+
+def branch_get_active(repository):
+    with open(repo_file(repository, "HEAD"), "r") as f:
+        head = f.read()
+    if head.startswith("ref: refs/heads/"):
+        return head[16:-1]
+    else:
+        return False
