@@ -10,6 +10,7 @@ import objects
 import index
 import ignore
 import refs
+import status
 
 def cmd_init(args):
     repo.repo_create(args.path)
@@ -57,7 +58,7 @@ def cmd_checkout(args):
 
 def cmd_show_ref(args):
     repository = repo.repo_find()
-    rfs = repo.ref_list(repository)
+    rfs = refs.ref_list(repository)
     refs.show_ref(repository, rfs, prefix="refs")
 
 def cmd_tag(args):
@@ -65,7 +66,7 @@ def cmd_tag(args):
     if args.name:
         refs.tag_create(repository, args.name, args.object, create_tag_object=args.create_tag_object)
     else:
-        rfs = repo.ref_list(repository)
+        rfs = refs.ref_list(repository)
         refs.show_ref(repository, rfs["tags"], with_hash=False)
 
 def cmd_rev_parse(args):
@@ -101,82 +102,37 @@ def cmd_check_ignore(args):
             print(path)
 
 def cmd_status_branch(repository):
-    branch = repo.branch_get_active(repository)
+    branch = refs.branch_get_active(repository)
     if branch:
         print(f"On branch {branch}.")
     else:
         print(f"HEAD detached at {objects.object_find(repository, 'HEAD')}")
 
-def cmd_status_head_index(repository, idx):
-    # compare index (staging area) with HEAD commit
-    # shows files staged for commit (added, modified, or deleted relative to HEAD)
+def render_status(st):
+    # render a WorktreeStatus value; all classification lives in the status module
     print("Changes to be committed:")
-    head_sha = repo.ref_resolve(repository, "HEAD")
-    if head_sha:
-        head = objects.tree_to_dict(repository, "HEAD")
-    else:
-        head = dict()
-    
-    for entry in idx.entries:
-        if entry.name in head:
-            if head[entry.name] != entry.sha:
-                print("  modified:", entry.name)
-            del head[entry.name]
-        else:
-            print("  added:   ", entry.name)
-    
-    for entry in head.keys():
-        print("  deleted: ", entry)
-
-def cmd_status_index_worktree(repository, idx):
-    # compare working directory with index (staging area)
-    # shows modified files (changed on disk but not staged) and untracked files
+    for name in st.staged_modified:
+        print("  modified:", name)
+    for name in st.staged_added:
+        print("  added:   ", name)
+    for name in st.staged_deleted:
+        print("  deleted: ", name)
+    print()
     print("Changes not staged for commit:")
-    ign = ignore.gitignore_read(repository)
-    gitdir_prefix = repository.gitdir + os.path.sep
-    all_files = list()
-    
-    for (root, _, files) in os.walk(repository.worktree, True):
-        if root == repository.gitdir or root.startswith(gitdir_prefix):
-            continue
-        for f in files:
-            full_path = os.path.join(root, f)
-            rel_path = os.path.relpath(full_path, repository.worktree)
-            all_files.append(rel_path)
-    
-    for entry in idx.entries:
-        full_path = os.path.join(repository.worktree, entry.name)
-        if not os.path.exists(full_path):
-            print("  deleted: ", entry.name)
-        else:
-            # compare file timestamps and content sha to detect modifications
-            # we check both ctime (creation/metadata change) and mtime (content modification)
-            stat = os.stat(full_path)
-            ctime_ns = entry.ctime[0] * 10**9 + entry.ctime[1]
-            mtime_ns = entry.mtime[0] * 10**9 + entry.mtime[1]
-            if (stat.st_ctime_ns != ctime_ns) or (stat.st_mtime_ns != mtime_ns):
-                with open(full_path, "rb") as fd:
-                    new_sha = objects.object_hash(fd, b"blob", None)
-                    same = entry.sha == new_sha
-                    if not same:
-                        print("  modified:", entry.name)
-        
-        if entry.name in all_files:
-            all_files.remove(entry.name)
-    
+    for name in st.unstaged_modified:
+        print("  modified:", name)
+    for name in st.unstaged_deleted:
+        print("  deleted: ", name)
     print()
     print("Untracked files:")
-    for f in all_files:
-        if not ignore.check_ignore(ign, f):
-            print(" ", f)
+    for f in st.untracked:
+        print(" ", f)
 
 def cmd_status(_):
     repository = repo.repo_find()
     idx = index.index_read(repository)
     cmd_status_branch(repository)
-    cmd_status_head_index(repository, idx)
-    print()
-    cmd_status_index_worktree(repository, idx)
+    render_status(status.compute(repository, idx))
 
 def cmd_rm(args):
     repository = repo.repo_find()
@@ -189,36 +145,17 @@ def cmd_add(args):
 def cmd_commit(args):
     repository = repo.repo_find()
     idx = index.index_read(repository)
+    if not status.compute(repository, idx).has_staged_changes:
+        print("nothing to commit")
+        return
     tree = index.tree_from_index(repository, idx)
-    commit = objects.commit_create(repository, tree, repo.ref_resolve(repository, "HEAD"), repo.gitconfig_user_get(repo.gitconfig_read()), datetime.now(), args.message)
-    active_branch = repo.branch_get_active(repository)
+    commit = objects.commit_create(repository, tree, refs.ref_resolve(repository, "HEAD"), repo.gitconfig_user_get(repo.gitconfig_read()), datetime.now(), args.message)
+    active_branch = refs.branch_get_active(repository)
     if active_branch:
-        with open(repo.repo_file(repository, os.path.join("refs/heads", active_branch)), "w") as fd:
-            fd.write(commit + "\n")
+        refs.ref_create(repository, "heads/" + active_branch, commit)
     else:
         with open(repo.repo_file(repository, "HEAD"), "w") as fd:
-            fd.write("\n")
-
-def commit_create(repository, tree, parent, author, timestamp, message):
-    # build git commit object with tree reference, parent link, and metadata
-    # format follows git commit format: key-value metadata with message as body
-    commit = objects.GitCommit()
-    commit.kvlm[b"tree"] = tree.encode("ascii")
-    if parent:
-        commit.kvlm[b"parent"] = parent.encode("ascii")
-    message = message.strip() + "\n"
-    offset = int(timestamp.astimezone().utcoffset().total_seconds())
-    hours = offset // 3600
-    minutes = (offset % 3600) // 60
-    # git commit timestamp format: "unix_timestamp +HHMM" where HHMM is timezone offset
-    tz = "{}{:02}{:02}".format("+" if offset > 0 else "-", hours, minutes)
-    author = author + timestamp.strftime(" %s ") + tz
-    commit.kvlm[b"author"] = author.encode("utf8")
-    commit.kvlm[b"committer"] = author.encode("utf8")
-    commit.kvlm[None] = message.encode("utf8")
-    return objects.object_write(commit, repository)
-
-objects.commit_create = commit_create
+            fd.write(commit + "\n")
 
 def main():
     argparser = argparse.ArgumentParser(description="wyag - the stupidest content tracker")

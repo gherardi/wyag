@@ -7,6 +7,10 @@ import tempfile
 from math import ceil
 
 import repo
+import refs
+
+class ObjectNotFound(Exception):
+    pass
 
 class GitObject(object):
     def __init__(self, data=None):
@@ -58,12 +62,28 @@ class GitTree(GitObject):
     def init(self):
         self.items = list()
 
+# single source of truth: git object format-name -> Python class
+OBJECT_TYPES = {
+    b'commit': GitCommit,
+    b'tree':   GitTree,
+    b'tag':    GitTag,
+    b'blob':   GitBlob,
+}
+
+# tree leaf mode prefix (first 2 bytes) -> display type string
+TREE_LEAF_MODE_TYPES = {
+    b'04': 'tree',
+    b'10': 'blob',
+    b'12': 'blob',
+    b'16': 'commit',
+}
+
 def object_read(repository, sha):
     # decompress git object from disk and parse its header
     # format: type-name space size null-byte data
     path = repo.repo_file(repository, "objects", sha[0:2], sha[2:])
     if not os.path.isfile(path):
-        return None
+        raise ObjectNotFound(f"Object {sha} not found.")
     with open (path, "rb") as f:
         raw = zlib.decompress(f.read())
         x = raw.find(b' ')
@@ -72,14 +92,10 @@ def object_read(repository, sha):
         size = int(raw[x:y].decode("ascii"))
         if size != len(raw)-y-1:
             raise Exception(f"Malformed object {sha}: bad length")
-        match fmt:
-            case b'commit' : c=GitCommit
-            case b'tree'   : c=GitTree
-            case b'tag'    : c=GitTag
-            case b'blob'   : c=GitBlob
-            case _:
-                raise Exception(f"Unknown type {fmt.decode('ascii')} for object {sha}")
-        return c(raw[y+1:])
+        cls = OBJECT_TYPES.get(fmt)
+        if cls is None:
+            raise Exception(f"Unknown type {fmt.decode('ascii')} for object {sha}")
+        return cls(raw[y+1:])
 
 def object_write(obj, repository=None):
     """
@@ -123,8 +139,6 @@ def object_find(repository, name, fmt=None, follow=True):
     # follow object references through tags and commits to find requested type
     while True:
         obj = object_read(repository, sha)
-        if obj is None:
-            raise Exception(f"Object {sha} not found.")
         if obj.fmt == fmt:
             return sha
         if not follow:
@@ -142,7 +156,7 @@ def object_resolve(repository, name):
     if not name.strip():
         return None
     if name == "HEAD":
-        head = repo.ref_resolve(repository, "HEAD")
+        head = refs.ref_resolve(repository, "HEAD")
         return [ head ] if head else []
     if hashRE.match(name):
         name = name.lower()
@@ -153,22 +167,20 @@ def object_resolve(repository, name):
             for f in os.listdir(path):
                 if f.startswith(rem):
                     candidates.append(prefix + f)
-    as_tag = repo.ref_resolve(repository, "refs/tags/" + name)
+    as_tag = refs.ref_resolve(repository, "refs/tags/" + name)
     if as_tag: candidates.append(as_tag)
-    as_branch = repo.ref_resolve(repository, "refs/heads/" + name)
+    as_branch = refs.ref_resolve(repository, "refs/heads/" + name)
     if as_branch: candidates.append(as_branch)
-    as_remote_branch = repo.ref_resolve(repository, "refs/remotes/" + name)
+    as_remote_branch = refs.ref_resolve(repository, "refs/remotes/" + name)
     if as_remote_branch: candidates.append(as_remote_branch)
     return candidates
 
 def object_hash(fd, fmt, repository=None):
     data = fd.read()
-    match fmt:
-        case b'commit' : obj=GitCommit(data)
-        case b'tree'   : obj=GitTree(data)
-        case b'tag'    : obj=GitTag(data)
-        case b'blob'   : obj=GitBlob(data)
-        case _: raise Exception(f"Unknown type {fmt}!")
+    cls = OBJECT_TYPES.get(fmt)
+    if cls is None:
+        raise Exception(f"Unknown type {fmt}!")
+    obj = cls(data)
     return object_write(obj, repository)
 
 def kvlm_parse(raw, start=0, dct=None):
@@ -271,17 +283,12 @@ def tree_serialize(obj):
 def ls_tree(repository, ref, recursive=None, prefix=""):
     sha = object_find(repository, ref, fmt=b"tree")
     obj = object_read(repository, sha)
-    if obj is None:
-        raise Exception(f"Object {sha} not found.")
     for item in obj.items:
         # mode is normalized to 6 bytes on parse, so the type prefix is the first 2
         type = item.mode[0:2]
-        match type:
-            case b'04': type = "tree"
-            case b'10': type = "blob"
-            case b'12': type = "blob"
-            case b'16': type = "commit"
-            case _: raise Exception(f"Weird tree leaf mode {item.mode}")
+        if type not in TREE_LEAF_MODE_TYPES:
+            raise Exception(f"Weird tree leaf mode {item.mode}")
+        type = TREE_LEAF_MODE_TYPES[type]
         if not (recursive and type=='tree'):
             print(f"{item.mode.decode('ascii')} {type} {item.sha}\t{os.path.join(prefix, item.path)}")
         else:
@@ -290,8 +297,6 @@ def ls_tree(repository, ref, recursive=None, prefix=""):
 def tree_checkout(repository, tree, path):
     for item in tree.items:
         obj = object_read(repository, item.sha)
-        if obj is None:
-            raise Exception(f"Object {item.sha} not found.")
         dest = os.path.join(path, item.path)
         if obj.fmt == b'tree':
             os.mkdir(dest)
@@ -319,8 +324,6 @@ def log_graphviz(repository, sha, seen):
     if sha in seen: return
     seen.add(sha)
     commit = object_read(repository, sha)
-    if commit is None:
-        raise Exception(f"Object {sha} not found.")
     message = commit.kvlm[None].decode("utf8").strip()
     message = message.replace("\\", "\\\\").replace("\"", "\\\"")
     if "\n" in message:
@@ -334,3 +337,22 @@ def log_graphviz(repository, sha, seen):
         p = p.decode("ascii")
         print (f"  c_{sha} -> c_{p};")
         log_graphviz(repository, p, seen)
+
+def commit_create(repository, tree, parent, author, timestamp, message):
+    # build git commit object with tree reference, parent link, and metadata
+    # format follows git commit format: key-value metadata with message as body
+    commit = GitCommit()
+    commit.kvlm[b"tree"] = tree.encode("ascii")
+    if parent:
+        commit.kvlm[b"parent"] = parent.encode("ascii")
+    message = message.strip() + "\n"
+    offset = int(timestamp.astimezone().utcoffset().total_seconds())
+    hours = offset // 3600
+    minutes = (offset % 3600) // 60
+    # git commit timestamp format: "unix_timestamp +HHMM" where HHMM is timezone offset
+    tz = "{}{:02}{:02}".format("+" if offset > 0 else "-", hours, minutes)
+    author = author + timestamp.strftime(" %s ") + tz
+    commit.kvlm[b"author"] = author.encode("utf8")
+    commit.kvlm[b"committer"] = author.encode("utf8")
+    commit.kvlm[None] = message.encode("utf8")
+    return object_write(commit, repository)
