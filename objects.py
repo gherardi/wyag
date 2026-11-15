@@ -1,11 +1,11 @@
 import hashlib
 import os
 import re
+import zlib
+from datetime import datetime, timedelta, timezone
 
+import repo
 import refs
-
-class ObjectNotFound(Exception):
-    pass
 
 class GitObject(object):
     def __init__(self, data=None):
@@ -57,7 +57,6 @@ class GitTree(GitObject):
     def init(self):
         self.items = list()
 
-# single source of truth: git object format-name -> Python class
 OBJECT_TYPES = {
     b'commit': GitCommit,
     b'tree':   GitTree,
@@ -65,7 +64,7 @@ OBJECT_TYPES = {
     b'blob':   GitBlob,
 }
 
-# tree leaf mode prefix (first 2 bytes) -> display type string
+# first two digits of a tree leaf mode -> object type
 TREE_LEAF_MODE_TYPES = {
     b'04': 'tree',
     b'10': 'blob',
@@ -74,40 +73,33 @@ TREE_LEAF_MODE_TYPES = {
 }
 
 def object_read(repository, sha):
-    # read raw object bytes through storage adapter and deserialize
-    raw = repository.storage.read_object(sha)
-    if raw is None:
+    path = repo.repo_file(repository, "objects", sha[0:2], sha[2:])
+    if not path or not os.path.isfile(path):
         return None
-    return object_deserialize(raw)
-
-def object_write(obj, repository=None):
-    # serialize then persist through storage adapter if repository given
-    data = obj.serialize()
-    result = obj.fmt + b' ' + str(len(data)).encode() + b'\x00' + data
-    sha = hashlib.sha1(result).hexdigest()
-    if repository:
-        repository.storage.write_object(sha, result)
-    return sha
-
-def object_serialize(obj):
-    # render git object to on-the-wire bytes and content hash (pure, no I/O)
-    data = obj.serialize()
-    raw = obj.fmt + b' ' + str(len(data)).encode() + b'\x00' + data
-    sha = hashlib.sha1(raw).hexdigest()
-    return sha, raw
-
-def object_deserialize(raw):
-    # deserialize raw bytes to git object, returns None if malformed
+    with open(path, "rb") as f:
+        raw = zlib.decompress(f.read())
+    # object format: "type size\x00content"
     x = raw.find(b' ')
     fmt = raw[0:x]
     y = raw.find(b'\x00', x)
     size = int(raw[x:y].decode("ascii"))
     if size != len(raw)-y-1:
-        raise Exception(f"Malformed object: bad length")
+        raise Exception(f"Malformed object {sha}: bad length")
     cls = OBJECT_TYPES.get(fmt)
     if cls is None:
-        raise Exception(f"Unknown type {fmt.decode('ascii')}")
+        raise Exception(f"Unknown type {fmt.decode('ascii')} for object {sha}")
     return cls(raw[y+1:])
+
+def object_write(obj, repository=None):
+    data = obj.serialize()
+    result = obj.fmt + b' ' + str(len(data)).encode() + b'\x00' + data
+    sha = hashlib.sha1(result).hexdigest()
+    if repository:
+        path = repo.repo_file(repository, "objects", sha[0:2], sha[2:], mkdir=True)
+        if not os.path.exists(path):
+            with open(path, "wb") as f:
+                f.write(zlib.compress(result))
+    return sha
 
 def object_find(repository, name, fmt=None, follow=True):
     sha = object_resolve(repository, name)
@@ -119,7 +111,7 @@ def object_find(repository, name, fmt=None, follow=True):
     sha = sha[0]
     if not fmt:
         return sha
-    # follow object references through tags and commits to find requested type
+    # follow tags and commits until we reach the requested type
     while True:
         obj = object_read(repository, sha)
         if obj is None:
@@ -156,8 +148,6 @@ def object_resolve(repository, name):
     if as_tag: candidates.append(as_tag)
     as_branch = refs.ref_resolve(repository, "refs/heads/" + name)
     if as_branch: candidates.append(as_branch)
-    as_remote_branch = refs.ref_resolve(repository, "refs/remotes/" + name)
-    if as_remote_branch: candidates.append(as_remote_branch)
     return candidates
 
 def object_hash(fd, fmt, repository=None):
@@ -169,7 +159,8 @@ def object_hash(fd, fmt, repository=None):
     return object_write(obj, repository)
 
 def kvlm_parse(raw, start=0, dct=None):
-    # git commit/tag format: key-value list with multi-line values (continuation lines start with space)
+    # commits and tags are "key value" lines, a blank line, then the message.
+    # a value continues on the next line if that line starts with a space.
     if dct is None: dct = dict()
     spc = raw.find(b' ', start)
     nl = raw.find(b'\n', start)
@@ -183,13 +174,10 @@ def kvlm_parse(raw, start=0, dct=None):
     while True:
         end = raw.find(b'\n', end+1)
         if end == -1:
-            # malformed: header value runs to the end with no terminating newline
             end = len(raw)
             break
-        # a continuation line starts with a space; otherwise the value ends here
         if end + 1 >= len(raw) or raw[end+1] != ord(' '):
             break
-    # unescape continuation lines by removing leading space
     value = raw[spc+1:end].replace(b'\n ', b'\n')
     if key in dct:
         if type(dct[key]) == list:
@@ -201,8 +189,6 @@ def kvlm_parse(raw, start=0, dct=None):
     return kvlm_parse(raw, start=end+1, dct=dct)
 
 def kvlm_serialize(kvlm):
-    # git commit/tag format serialization with continuation line escaping
-    # multi-line values must have each newline followed by a space (escaped as \n )
     ret = b''
     for k in kvlm.keys():
         if k == None: continue
@@ -214,7 +200,7 @@ def kvlm_serialize(kvlm):
     return ret
 
 def tree_parse_one(raw, start=0):
-    # git tree format: mode(5-6 bytes) space path null-terminated sha(20 bytes)
+    # tree entry: mode, space, path, null byte, 20-byte binary sha
     x = raw.find(b' ', start)
     if x - start not in (5, 6):
         raise Exception(f"Malformed tree entry: bad mode width at offset {start}")
@@ -228,8 +214,6 @@ def tree_parse_one(raw, start=0):
     return y+21, GitTreeLeaf(mode, path.decode("utf8"), sha)
 
 def tree_parse(raw):
-    # parse variable-length entries from tree object binary data
-    # each entry: mode path(null-terminated) 20-byte binary sha
     pos = 0
     max = len(raw)
     ret = list()
@@ -239,14 +223,10 @@ def tree_parse(raw):
     return ret
 
 def is_tree(mode):
-    # tree (directory) entries have mode 040000; blobs, symlinks (120000) and
-    # gitlinks (160000) are all leaves
     return mode.startswith(b"04")
 
 def tree_leaf_sort_key(leaf):
-    # git sorts tree entries by name, treating a directory as if its name ended
-    # in "/" so a subtree sorts before a file sharing its prefix; only trees get
-    # the implicit slash (symlinks/gitlinks sort as plain names)
+    # git sorts directories as if their name ended with "/"
     if is_tree(leaf.mode):
         return leaf.path + "/"
     else:
@@ -256,7 +236,7 @@ def tree_serialize(obj):
     obj.items.sort(key=tree_leaf_sort_key)
     ret = b''
     for i in obj.items:
-        # git stores modes as octal with no leading zero (tree 040000 -> 40000)
+        # git writes modes without the leading zero (040000 -> 40000)
         ret += i.mode.lstrip(b"0")
         ret += b' '
         ret += i.path.encode("utf8")
@@ -269,7 +249,6 @@ def ls_tree(repository, ref, recursive=None, prefix=""):
     sha = object_find(repository, ref, fmt=b"tree")
     obj = object_read(repository, sha)
     for item in obj.items:
-        # mode is normalized to 6 bytes on parse, so the type prefix is the first 2
         type = item.mode[0:2]
         if type not in TREE_LEAF_MODE_TYPES:
             raise Exception(f"Weird tree leaf mode {item.mode}")
@@ -296,48 +275,63 @@ def tree_to_dict(repository, ref, prefix=""):
     tree = object_read(repository, tree_sha)
     for leaf in tree.items:
         full_path = os.path.join(prefix, leaf.path)
-        is_subtree = is_tree(leaf.mode)
-        if is_subtree:
+        if is_tree(leaf.mode):
             ret.update(tree_to_dict(repository, leaf.sha, full_path))
         else:
             ret[full_path] = leaf.sha
     return ret
 
-def log_graphviz(repository, sha, seen):
-    # depth-first traversal of commit graph with cycle detection
-    # 'seen' set prevents infinite loops on circular commit history (shouldn't happen in valid repos)
-    if sha in seen: return
-    seen.add(sha)
-    commit = object_read(repository, sha)
-    message = commit.kvlm[None].decode("utf8").strip()
-    message = message.replace("\\", "\\\\").replace("\"", "\\\"")
-    if "\n" in message:
-        message = message[:message.index("\n")]
-    print(f"  c_{sha} [label=\"{sha[0:7]}: {message}\"]")
-    assert commit.fmt==b'commit'
-    if not b'parent' in commit.kvlm.keys(): return
-    parents = commit.kvlm[b'parent']
-    if type(parents) != list: parents = [ parents ]
-    for p in parents:
-        p = p.decode("ascii")
-        print (f"  c_{sha} -> c_{p};")
-        log_graphviz(repository, p, seen)
+def log(repository, sha):
+    # walk the history following the first parent of each commit
+    while sha:
+        commit = object_read(repository, sha)
+        assert commit.fmt == b'commit'
+        # author line: "Name <email> timestamp +hhmm"
+        author, ts, tz = commit.kvlm[b'author'].decode("utf8").rsplit(" ", 2)
+        offset = timedelta(hours=int(tz[1:3]), minutes=int(tz[3:5]))
+        if tz[0] == "-":
+            offset = -offset
+        date = datetime.fromtimestamp(int(ts), timezone(offset))
+        print(f"commit {sha}")
+        print(f"Author: {author}")
+        print(f"Date:   {date.strftime('%a %b %d %H:%M:%S %Y')} {tz}")
+        print()
+        for line in commit.kvlm[None].decode("utf8").strip().splitlines():
+            print(f"    {line}")
+        print()
+        parents = commit.kvlm.get(b'parent')
+        if type(parents) == list:
+            parents = parents[0]
+        sha = parents.decode("ascii") if parents else None
 
 def commit_create(repository, tree, parent, author, timestamp, message):
-    # build git commit object with tree reference, parent link, and metadata
-    # format follows git commit format: key-value metadata with message as body
     commit = GitCommit()
     commit.kvlm[b"tree"] = tree.encode("ascii")
     if parent:
         commit.kvlm[b"parent"] = parent.encode("ascii")
     message = message.strip() + "\n"
+    # timezone offset in git format: +hhmm or -hhmm
     offset = int(timestamp.astimezone().utcoffset().total_seconds())
-    hours = offset // 3600
-    minutes = (offset % 3600) // 60
-    # git commit timestamp format: "unix_timestamp +HHMM" where HHMM is timezone offset
-    tz = "{}{:02d}{:02d}".format("+" if offset >= 0 else "-", abs(hours), abs(minutes))
-    author = author + timestamp.strftime(" %s ") + tz
+    sign = "+" if offset >= 0 else "-"
+    hours, minutes = divmod(abs(offset) // 60, 60)
+    tz = f"{sign}{hours:02d}{minutes:02d}"
+    author = f"{author} {int(timestamp.timestamp())} {tz}"
     commit.kvlm[b"author"] = author.encode("utf8")
     commit.kvlm[b"committer"] = author.encode("utf8")
     commit.kvlm[None] = message.encode("utf8")
     return object_write(commit, repository)
+
+def tag_create(repository, name, ref, create_tag_object=False):
+    # a lightweight tag is just a ref; an annotated tag is a tag object the ref points to
+    sha = object_find(repository, ref)
+    if create_tag_object:
+        tag = GitTag()
+        tag.kvlm[b'object'] = sha.encode()
+        tag.kvlm[b'type'] = b'commit'
+        tag.kvlm[b'tag'] = name.encode()
+        tag.kvlm[b'tagger'] = f"Wyag <wyag@example.com> {int(datetime.now().timestamp())} +0000".encode()
+        tag.kvlm[None] = b"A tag generated by wyag, which won't let you customize the message!\n"
+        tag_sha = object_write(tag, repository)
+        refs.ref_create(repository, "tags/" + name, tag_sha)
+    else:
+        refs.ref_create(repository, "tags/" + name, sha)
