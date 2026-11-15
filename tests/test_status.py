@@ -12,8 +12,7 @@ import objects
 import status
 
 
-class StatusReportTests(unittest.TestCase):
-    # status_report returns a value, so we assert on data instead of scraping stdout
+class StatusTests(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -43,17 +42,17 @@ class StatusReportTests(unittest.TestCase):
             f.write(sha + "\n")
         return sha
 
-    def _report(self):
-        return status.status_report(self.r, index.index_read(self.r))
+    def _staged(self):
+        return status.staged_changes(self.r, index.index_read(self.r))
 
-    def test_branch_is_master(self):
-        self.assertEqual(self._report().branch, "master")
+    def _worktree(self):
+        return status.worktree_changes(self.r, index.index_read(self.r))
 
     def test_added_is_staged(self):
         self._commit_index()  # HEAD = empty-tree commit
         self._write("new.txt", "hi")
         self._add("new.txt")
-        self.assertIn(("added", "new.txt"), self._report().staged)
+        self.assertIn(("added", "new.txt"), self._staged())
 
     def test_committed_then_modified_is_staged_modified(self):
         self._write("f.txt", "v1")
@@ -61,14 +60,14 @@ class StatusReportTests(unittest.TestCase):
         self._commit_index()
         self._write("f.txt", "v2 changed")
         self._add("f.txt")
-        self.assertIn(("modified", "f.txt"), self._report().staged)
+        self.assertIn(("modified", "f.txt"), self._staged())
 
     def test_removed_from_index_is_staged_deleted(self):
         self._write("gone.txt", "data")
         self._add("gone.txt")
         self._commit_index()
         index.rm(self.r, [os.path.join(self.path, "gone.txt")])
-        self.assertIn(("deleted", "gone.txt"), self._report().staged)
+        self.assertIn(("deleted", "gone.txt"), self._staged())
 
     def test_worktree_edit_is_unstaged_modified(self):
         full = self._write("w.txt", "first")
@@ -76,29 +75,29 @@ class StatusReportTests(unittest.TestCase):
         self._commit_index()
         with open(full, "w") as f:
             f.write("edited on disk")
-        # force a different mtime so detection is deterministic
+        # change the mtime, otherwise the edit may land in the same timestamp
         future = os.stat(full).st_mtime + 100
         os.utime(full, (future, future))
-        self.assertIn(("modified", "w.txt"), self._report().unstaged)
+        self.assertIn(("modified", "w.txt"), self._worktree()[0])
 
     def test_worktree_delete_is_unstaged_deleted(self):
         full = self._write("d.txt", "data")
         self._add("d.txt")
         self._commit_index()
         os.unlink(full)
-        self.assertIn(("deleted", "d.txt"), self._report().unstaged)
+        self.assertIn(("deleted", "d.txt"), self._worktree()[0])
 
     def test_untracked_file_is_listed(self):
         self._write("loose.txt", "untracked")
-        self.assertIn("loose.txt", self._report().untracked)
+        self.assertIn("loose.txt", self._worktree()[1])
 
     def test_clean_tracked_file_is_not_reported(self):
         self._write("clean.txt", "stable")
         self._add("clean.txt")
         self._commit_index()
-        rep = self._report()
-        self.assertNotIn("clean.txt", rep.untracked)
-        self.assertEqual(rep.unstaged, [])
+        unstaged, untracked = self._worktree()
+        self.assertNotIn("clean.txt", untracked)
+        self.assertEqual(unstaged, [])
 
 
 if __name__ == "__main__":
