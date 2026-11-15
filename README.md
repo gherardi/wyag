@@ -21,7 +21,7 @@ A lightweight version control system implementation in Python.
 | `init [directory]` | Create a new, empty repository |
 | `cat-file <type> <object>` | Print the raw content of an object (blob, tree, commit or tag) |
 | `hash-object [-t type] [-w] <file>` | Compute the SHA-1 of a file and optionally write it to the object database |
-| `log [commit]` | Print the commit history as a Graphviz graph |
+| `log [commit]` | Print the commit history, starting from the given commit (HEAD by default) |
 | `ls-tree [-r] <tree>` | List the contents of a tree object, optionally recursing into subtrees |
 | `checkout <commit> <directory>` | Extract a commit or tree into an empty directory |
 | `show-ref` | List all references with their hashes |
