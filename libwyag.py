@@ -1,8 +1,6 @@
 import argparse
 import sys
 import os
-import pwd
-import grp
 from datetime import datetime
 
 import repo
@@ -17,16 +15,12 @@ def cmd_init(args):
 
 def cmd_cat_file(args):
     repository = repo.repo_find()
-    # object data serialized to stdout
     obj = objects.object_read(repository, objects.object_find(repository, args.object, fmt=args.type.encode()))
     sys.stdout.buffer.write(obj.serialize())
 
 def cmd_log(args):
     repository = repo.repo_find()
-    print("digraph wyaglog{")
-    print("  node[shape=rect]")
-    objects.log_graphviz(repository, objects.object_find(repository, args.commit), set())
-    print("}")
+    objects.log(repository, objects.object_find(repository, args.commit))
 
 def cmd_hash_object(args):
     if args.write:
@@ -43,7 +37,6 @@ def cmd_ls_tree(args):
 
 def cmd_checkout(args):
     repository = repo.repo_find()
-    # resolve to a tree, following annotated tags and commits
     obj = objects.object_read(repository, objects.object_find(repository, args.commit, fmt=b'tree'))
 
     if os.path.exists(args.path):
@@ -64,7 +57,7 @@ def cmd_show_ref(args):
 def cmd_tag(args):
     repository = repo.repo_find()
     if args.name:
-        refs.tag_create(repository, args.name, args.object, create_tag_object=args.create_tag_object)
+        objects.tag_create(repository, args.name, args.object, create_tag_object=args.create_tag_object)
     else:
         rfs = refs.ref_list(repository)
         refs.show_ref(repository, rfs["tags"], with_hash=False)
@@ -86,13 +79,8 @@ def cmd_ls_files(args):
     for e in idx.entries:
         print(e.name)
         if args.verbose:
-            entry_type = {0b1000: "regular file", 0b1010: "symlink", 0b1110: "git link"}[e.mode_type]
-            print(f"  {entry_type} with perms: {e.mode_perms:o}")
-            print(f"  on blob: {e.sha}")
-            print(f"  created: {datetime.fromtimestamp(e.ctime[0])}.{e.ctime[1]}, modified: {datetime.fromtimestamp(e.mtime[0])}.{e.mtime[1]}")
-            print(f"  device: {e.dev}, inode: {e.ino}")
-            print(f"  user: {pwd.getpwuid(e.uid).pw_name} ({e.uid})  group: {grp.getgrgid(e.gid).gr_name} ({e.gid})")
-            print(f"  flags: stage={e.flag_stage} assume_valid={e.flag_assume_valid}")
+            print(f"  mode: {e.mode_type:o}{e.mode_perms:04o}  blob: {e.sha}")
+            print(f"  modified: {datetime.fromtimestamp(e.mtime[0])}")
 
 def cmd_check_ignore(args):
     repository = repo.repo_find()
@@ -101,38 +89,26 @@ def cmd_check_ignore(args):
         if ignore.check_ignore(rules, path):
             print(path)
 
-def cmd_status_branch(repository):
+def cmd_status(_):
+    repository = repo.repo_find()
+    idx = index.index_read(repository)
     branch = refs.branch_get_active(repository)
     if branch:
         print(f"On branch {branch}.")
     else:
         print(f"HEAD detached at {objects.object_find(repository, 'HEAD')}")
-
-def render_status(st):
-    # render a WorktreeStatus value; all classification lives in the status module
     print("Changes to be committed:")
-    for name in st.staged_modified:
-        print("  modified:", name)
-    for name in st.staged_added:
-        print("  added:   ", name)
-    for name in st.staged_deleted:
-        print("  deleted: ", name)
+    for (kind, name) in status.staged_changes(repository, idx):
+        print(f"  {kind + ':':10}{name}")
+    unstaged, untracked = status.worktree_changes(repository, idx)
     print()
     print("Changes not staged for commit:")
-    for name in st.unstaged_modified:
-        print("  modified:", name)
-    for name in st.unstaged_deleted:
-        print("  deleted: ", name)
+    for (kind, name) in unstaged:
+        print(f"  {kind + ':':10}{name}")
     print()
     print("Untracked files:")
-    for f in st.untracked:
-        print(" ", f)
-
-def cmd_status(_):
-    repository = repo.repo_find()
-    idx = index.index_read(repository)
-    cmd_status_branch(repository)
-    render_status(status.compute(repository, idx))
+    for name in untracked:
+        print(f"  {name}")
 
 def cmd_rm(args):
     repository = repo.repo_find()
@@ -145,7 +121,7 @@ def cmd_add(args):
 def cmd_commit(args):
     repository = repo.repo_find()
     idx = index.index_read(repository)
-    if not status.compute(repository, idx).has_staged_changes:
+    if not status.staged_changes(repository, idx):
         print("nothing to commit")
         return
     tree = index.tree_from_index(repository, idx)
