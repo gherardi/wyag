@@ -1,7 +1,6 @@
+import hashlib
 import os
 import stat
-import time
-import tempfile
 from math import ceil
 
 import repo
@@ -32,9 +31,8 @@ class GitIndex(object):
         self.entries = entries
 
 def index_read(repository):
-    # git index (staging area) binary format: header + entries + hash
-    # header: 4-byte signature + version + entry count
-    # entries: 62 bytes + filename + null + padding to 8-byte boundary
+    # index format: 12-byte header, then the entries, then a sha1 of everything before it.
+    # each entry is 62 bytes of metadata + name + null byte, padded to a multiple of 8.
     index_file = repo.repo_file(repository, "index")
     if not os.path.exists(index_file):
         return GitIndex()
@@ -50,8 +48,6 @@ def index_read(repository):
     content = raw[12:]
     idx = 0
     for i in range(0, count):
-        # parse fixed 62-byte entry header with file metadata
-        # followed by variable-length filename and 8-byte padding alignment
         ctime_s =  int.from_bytes(content[idx: idx+4], "big")
         ctime_ns = int.from_bytes(content[idx+4: idx+8], "big")
         mtime_s = int.from_bytes(content[idx+8: idx+12], "big")
@@ -80,7 +76,7 @@ def index_read(repository):
             raw_name = content[idx:idx+name_length]
             idx += name_length + 1
         else:
-            # handle rare case where filename >= 4095 bytes (0xFFF is the sentinel value)
+            # names of 0xFFF bytes or more don't fit in the length field
             print(f"Notice: Name is 0x{name_length:X} bytes long.")
             null_idx = content.find(b'\x00', idx + 0xFFF)
             raw_name = content[idx: null_idx]
@@ -91,48 +87,37 @@ def index_read(repository):
     return GitIndex(version=version, entries=entries)
 
 def index_write(r, index):
-    index_file = repo.repo_file(r, "index")
-    # atomic write: write to temp file, then rename
-    dirname = os.path.dirname(index_file)
-    fd, tmp_path = tempfile.mkstemp(dir=dirname)
-
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(b"DIRC")
-            f.write(index.version.to_bytes(4, "big"))
-            f.write(len(index.entries).to_bytes(4, "big"))
-            idx = 0
-            for e in index.entries:
-                f.write(e.ctime[0].to_bytes(4, "big"))
-                f.write(e.ctime[1].to_bytes(4, "big"))
-                f.write(e.mtime[0].to_bytes(4, "big"))
-                f.write(e.mtime[1].to_bytes(4, "big"))
-                f.write(e.dev.to_bytes(4, "big"))
-                f.write(e.ino.to_bytes(4, "big"))
-                mode = (e.mode_type << 12) | e.mode_perms
-                f.write(mode.to_bytes(4, "big"))
-                f.write(e.uid.to_bytes(4, "big"))
-                f.write(e.gid.to_bytes(4, "big"))
-                f.write(e.fsize.to_bytes(4, "big"))
-                f.write(int(e.sha, 16).to_bytes(20, "big"))
-                flag_assume_valid = 0x1 << 15 if e.flag_assume_valid else 0
-                name_bytes = e.name.encode("utf8")
-                bytes_len = len(name_bytes)
-                name_length = 0xFFF if bytes_len >= 0xFFF else bytes_len
-                f.write((flag_assume_valid | e.flag_stage | name_length).to_bytes(2, "big"))
-                f.write(name_bytes)
-                f.write((0).to_bytes(1, "big"))
-                idx += 62 + len(name_bytes) + 1
-                if idx % 8 != 0:
-                    pad = 8 - (idx % 8)
-                    f.write((0).to_bytes(pad, "big"))
-                    idx += pad
-        # atomic rename
-        os.replace(tmp_path, index_file)
-    except Exception as e:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
-        raise e
+    data = b"DIRC"
+    data += index.version.to_bytes(4, "big")
+    data += len(index.entries).to_bytes(4, "big")
+    # git expects the entries sorted by name
+    index.entries.sort(key=lambda e: e.name.encode("utf8"))
+    for e in index.entries:
+        start = len(data)
+        data += e.ctime[0].to_bytes(4, "big")
+        data += e.ctime[1].to_bytes(4, "big")
+        data += e.mtime[0].to_bytes(4, "big")
+        data += e.mtime[1].to_bytes(4, "big")
+        data += e.dev.to_bytes(4, "big")
+        data += e.ino.to_bytes(4, "big")
+        mode = (e.mode_type << 12) | e.mode_perms
+        data += mode.to_bytes(4, "big")
+        data += e.uid.to_bytes(4, "big")
+        data += e.gid.to_bytes(4, "big")
+        data += e.fsize.to_bytes(4, "big")
+        data += int(e.sha, 16).to_bytes(20, "big")
+        flag_assume_valid = 0x1 << 15 if e.flag_assume_valid else 0
+        name_bytes = e.name.encode("utf8")
+        name_length = min(len(name_bytes), 0xFFF)
+        data += (flag_assume_valid | e.flag_stage | name_length).to_bytes(2, "big")
+        data += name_bytes + b"\x00"
+        size = len(data) - start
+        if size % 8 != 0:
+            data += b"\x00" * (8 - size % 8)
+    # git refuses an index without this trailing checksum
+    data += hashlib.sha1(data).digest()
+    with open(repo.repo_file(r, "index"), "wb") as f:
+        f.write(data)
 
 def rm(repository, paths, delete=True, skip_missing=False):
     index = index_read(repository)
@@ -161,18 +146,16 @@ def rm(repository, paths, delete=True, skip_missing=False):
     index.entries = kept_entries
     index_write(repository, index)
 
-def add(repository, paths, delete=True, skip_missing=False):
-    rm (repository, paths, delete=False, skip_missing=True)
+def add(repository, paths):
+    rm(repository, paths, delete=False, skip_missing=True)
     worktree = repository.worktree + os.sep
     gitdir_prefix = repository.gitdir + os.sep
     clean_paths = set()
     for path in paths:
         abspath = os.path.abspath(path)
-        # handle directory paths - recursively add all files
         if os.path.isdir(abspath):
             if abspath == repository.worktree or abspath.startswith(worktree):
                 for (root, dirs, files) in os.walk(abspath):
-                    # skip .git directory
                     if root == repository.gitdir or root.startswith(gitdir_prefix):
                         continue
                     for f in files:
@@ -184,7 +167,6 @@ def add(repository, paths, delete=True, skip_missing=False):
         elif os.path.isfile(abspath):
             if abspath.startswith(worktree) or abspath == repository.worktree:
                 relpath = os.path.relpath(abspath, repository.worktree)
-                # skip files in .git directory
                 if not (relpath.startswith(".git" + os.sep) or relpath == ".git"):
                     clean_paths.add((abspath, relpath))
             else:
@@ -193,16 +175,16 @@ def add(repository, paths, delete=True, skip_missing=False):
             raise Exception(f"Not a file, or outside the worktree: {paths}")
     index = index_read(repository)
     for (abspath, relpath) in clean_paths:
-        # lstat (not stat) so symlinks are detected rather than followed
+        # lstat, so that a symlink is not followed
         st = os.lstat(abspath)
         if stat.S_ISLNK(st.st_mode):
-            # a symlink is stored as a blob holding its target path
+            # git stores a symlink as a blob containing its target
             mode_type = 0b1010
             mode_perms = 0
             blob = objects.GitBlob(os.readlink(abspath).encode("utf8"))
             sha = objects.object_write(blob, repository)
         else:
-            # regular file: preserve the executable bit like git (100755 vs 100644)
+            # git only keeps the executable bit: 100755 or 100644
             mode_type = 0b1000
             mode_perms = 0o755 if (st.st_mode & stat.S_IXUSR) else 0o644
             with open(abspath, "rb") as fd:
@@ -219,9 +201,8 @@ def add(repository, paths, delete=True, skip_missing=False):
     index_write(repository, index)
 
 def tree_from_index(repository, index):
-    # convert index entries into tree objects
-    # tree objects are hierarchical: one per directory level
-    # process bottom-up from deepest paths to root
+    # one tree per directory, built from the deepest one up to the root,
+    # so that each subtree is written before its parent
     contents = dict()
     contents[""] = list()
     for entry in index.entries:
@@ -235,8 +216,6 @@ def tree_from_index(repository, index):
     sorted_paths = sorted(contents.keys(), key=len, reverse=True)
     sha = None
     for path in sorted_paths:
-        # build tree bottom-up: deepest directories first, then combine into parents
-        # this ensures child tree objects exist before parent references them
         tree = objects.GitTree()
         for entry in contents[path]:
             if isinstance(entry, GitIndexEntry):
