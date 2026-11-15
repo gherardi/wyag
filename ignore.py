@@ -55,8 +55,7 @@ def check_ignore1(rules, path):
     return result
 
 def check_ignore_scoped(rules, path):
-    # check ignore rules in .gitignore files from directories up to root
-    # rules are ordered by directory depth
+    # start from the .gitignore closest to the file and go up to the root
     parent = os.path.dirname(path)
     while True:
         if parent in rules:
@@ -67,15 +66,13 @@ def check_ignore_scoped(rules, path):
     return None
 
 def check_ignore_absolute(rules, path):
-    parent = os.path.dirname(path)
     for ruleset in rules:
         result = check_ignore1(ruleset, path)
         if result != None: return result
     return False
 
 def check_ignore(rules, path):
-    # evaluate ignore rules in order: scoped rules (.gitignore files) take precedence
-    # this allows subdirectories to override parent ignore patterns
+    # .gitignore files win over info/exclude and the global ignore file
     if os.path.isabs(path):
         raise Exception("This function requires path to be relative to the repository's root")
     result = check_ignore_scoped(rules.scoped, path)
