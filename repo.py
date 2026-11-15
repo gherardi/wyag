@@ -1,12 +1,7 @@
 import os
 import configparser
 
-import storage
-
 class GitRepository(object):
-    """
-    Representation of a Git repository: holds worktree, gitdir, and configuration.
-    """
     worktree = None
     gitdir = None
     conf = None
@@ -14,7 +9,6 @@ class GitRepository(object):
     def __init__(self, path, force=False):
         self.worktree = path
         self.gitdir = os.path.join(path, ".git")
-        self.storage = storage.FilesystemStorage(self.gitdir)
 
         if not (force or os.path.isdir(self.gitdir)):
             raise Exception(f"Not a Git repository {path}")
@@ -32,15 +26,12 @@ class GitRepository(object):
                 raise Exception(f"Unsupported repositoryformatversion: {vers}")
 
 def repo_path(repository, *path):
-    """
-    Compute path under repository's gitdir ensuring no path traversal occurs.
-    """
     destination = os.path.join(repository.gitdir, *path)
     destination = os.path.abspath(destination)
     gitdir_abs = os.path.abspath(repository.gitdir)
 
-    # path traversal security check: ensure destination stays within gitdir
-    if not destination.startswith(gitdir_abs):
+    # refuse paths that escape .git (e.g. a sha read from a corrupted ref)
+    if destination != gitdir_abs and not destination.startswith(gitdir_abs + os.sep):
         raise Exception(f"Potential Path Traversal Detected: {destination} is outside {gitdir_abs}")
     
     return destination
@@ -98,8 +89,7 @@ def repo_default_config():
     return ret
 
 def repo_find(path=".", required=True):
-    # search upward through directory tree for .git folder
-    # allows commands to work from any subdirectory in the repository
+    # look for .git in this directory, then in its parents
     path = os.path.realpath(path)
     if os.path.isdir(os.path.join(path, ".git")):
         return GitRepository(path)
@@ -126,11 +116,3 @@ def gitconfig_user_get(config):
         if "name" in config["user"] and "email" in config["user"]:
             return f"{config['user']['name']} <{config['user']['email']}>"
     return None
-
-def branch_get_active(repository):
-    with open(repo_file(repository, "HEAD"), "r") as f:
-        head = f.read()
-    if head.startswith("ref: refs/heads/"):
-        return head[16:-1]
-    else:
-        return False
