@@ -14,6 +14,26 @@ A lightweight version control system implementation in Python.
 ./wyag commit -m "message"
 ```
 
+## Commands
+
+| Command | Description |
+|---|---|
+| `init [directory]` | Create a new, empty repository |
+| `cat-file <type> <object>` | Print the raw content of an object (blob, tree, commit or tag) |
+| `hash-object [-t type] [-w] <file>` | Compute the SHA-1 of a file and optionally write it to the object database |
+| `log [commit]` | Print the commit history as a Graphviz graph |
+| `ls-tree [-r] <tree>` | List the contents of a tree object, optionally recursing into subtrees |
+| `checkout <commit> <directory>` | Extract a commit or tree into an empty directory |
+| `show-ref` | List all references with their hashes |
+| `tag [-a] [name] [object]` | List tags, or create a lightweight (or annotated, with `-a`) tag |
+| `rev-parse [--wyag-type type] <name>` | Resolve a name (HEAD, branch, tag, short hash) to a full SHA-1 |
+| `ls-files [--verbose]` | List the files in the staging area |
+| `check-ignore <path>...` | Print the paths that match the ignore rules |
+| `status` | Show the current branch, staged changes, unstaged changes and untracked files |
+| `rm <path>...` | Remove files from the index and the working tree |
+| `add <path>...` | Add files or directories to the index |
+| `commit -m <message>` | Record the staged changes as a new commit |
+
 ## Getting Started
 
 1. Clone the repository
